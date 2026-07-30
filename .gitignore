@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# build output
+.next/
+out/
+build/
+
+# local working notes, not part of the deliverable
+notes/
+
+# env
+.env
+.env*.local
+
+# aws / amplify
+.amplify/
+amplify_outputs*.json
+
+# misc
+.DS_Store
+*.log
