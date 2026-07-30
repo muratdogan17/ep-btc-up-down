@@ -3,6 +3,8 @@
 Guess whether BTC/USD will be higher or lower one minute from now. +1 if you are right,
 -1 if you are wrong, one guess at a time.
 
+**Live:** https://main.d1ladzr322rz9f.amplifyapp.com
+
 **Status:** work in progress. The design is settled before the implementation:
 [docs/api.md](docs/api.md) is the API contract — endpoints, error codes, the resolution
 rule, and the DynamoDB data model, with the reasoning behind each. Setup, deployment and
@@ -37,6 +39,11 @@ straight from this repository.
    [amplify.yml](amplify.yml), which is used as-is; the build runs `npm ci` and
    `npm run build` on Node 20.
 3. Save and deploy. Every push to `main` redeploys.
+
+Amplify decides at app-creation time whether an app is static hosting or SSR compute,
+based on the framework it detects in the connected branch. Connect the repo only when the
+Next.js app is actually on `main` — otherwise Amplify provisions plain static hosting, the
+build still succeeds, and every route answers `404` from S3.
 
 ## The rules
 
