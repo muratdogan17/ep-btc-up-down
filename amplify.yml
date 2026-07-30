@@ -7,6 +7,8 @@ frontend:
         - npm ci
     build:
       commands:
+        # A failing test fails the deploy.
+        - npm run test
         # `next build` type-checks as part of the build, so there is no separate step.
         - npm run build
   artifacts:
