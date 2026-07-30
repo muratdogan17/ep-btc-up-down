@@ -75,8 +75,7 @@ Without it the app deploys and serves pages but every data call fails. The role 
 Amplify creates by default (`AmplifySSRLoggingRole…`) only writes CloudWatch logs — it is
 not this.
 
-Create a role Amplify can assume. The conditions scope the trust to this account and this
-specific app, so no other Amplify app can borrow it:
+Create a role Amplify can assume:
 
 ```bash
 cat > /tmp/amplify-trust.json <<'JSON'
@@ -85,11 +84,7 @@ cat > /tmp/amplify-trust.json <<'JSON'
   "Statement": [{
     "Effect": "Allow",
     "Principal": { "Service": "amplify.amazonaws.com" },
-    "Action": "sts:AssumeRole",
-    "Condition": {
-      "StringEquals": { "aws:SourceAccount": "<account-id>" },
-      "ArnLike": { "aws:SourceArn": "arn:aws:amplify:eu-central-1:<account-id>:apps/<app-id>" }
-    }
+    "Action": "sts:AssumeRole"
   }]
 }
 JSON
@@ -98,6 +93,13 @@ aws iam create-role \
   --role-name btc-up-down-amplify-compute \
   --assume-role-policy-document file:///tmp/amplify-trust.json
 ```
+
+I first wrote this trust policy with `aws:SourceAccount` and `aws:SourceArn` conditions, to
+scope it to one app and rule out the confused-deputy case. Amplify rejects such a role when
+you attach it — *"The compute role provided cannot be assumed by Amplify"* — because its
+validation call doesn't carry those context keys. A role that can't be attached protects
+nothing, so the conditions are gone. The narrowing that survives is on the permission side,
+below: three actions, one table.
 
 Grant it exactly the three actions the app performs on exactly one table — no `Scan`, no
 `Query`, no `DeleteItem`, no wildcard resource:
