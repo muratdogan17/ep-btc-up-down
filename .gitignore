@@ -9,6 +9,10 @@ build/
 # local working notes, not part of the deliverable
 notes/
 
+# typescript / next generated
+*.tsbuildinfo
+next-env.d.ts
+
 # env
 .env
 .env*.local
@@ -20,3 +24,6 @@ amplify_outputs*.json
 # misc
 .DS_Store
 *.log
+
+# claude code local config
+.claude/
