@@ -35,6 +35,11 @@ export function serializeResolvedGuess(resolved: ResolvedGuess) {
     guessId: resolved.guessId,
     direction: resolved.direction,
     priceAtGuess: resolved.priceAtGuess,
+    // Kept so the UI can say how long the guess actually took to resolve. A guess made
+    // before the player closed the browser resolves when they come back, and hiding that
+    // would leave them comparing their guess to a price from an hour later with no
+    // explanation.
+    createdAt: resolved.createdAt,
     priceAtResolution: resolved.priceAtResolution,
     outcome: resolved.outcome,
     scoreDelta: resolved.scoreDelta,

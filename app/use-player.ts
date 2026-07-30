@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PriceSnapshot } from "@/lib/price";
+import { RESOLUTION_DELAY_MS } from "@/lib/resolve-guess";
 import type { Direction, GuessOutcome, PendingReason } from "@/lib/resolve-guess";
 
 /**
@@ -12,7 +13,7 @@ import type { Direction, GuessOutcome, PendingReason } from "@/lib/resolve-guess
  */
 const STORAGE_KEY = "btc-up-down.playerId";
 
-/** Faster while a guess is open, so the countdown stays honest. */
+/** Faster while a guess is open, so a resolution shows up promptly. */
 const POLL_PENDING_MS = 2_000;
 const POLL_IDLE_MS = 5_000;
 
@@ -31,6 +32,7 @@ export type ResolvedGuessView = {
   guessId: string;
   direction: Direction;
   priceAtGuess: number;
+  createdAt: string;
   priceAtResolution: number;
   outcome: GuessOutcome;
   scoreDelta: number;
@@ -46,10 +48,57 @@ export type PlayerState = {
   price: PriceSnapshot;
 };
 
+export type CountdownAnchor = {
+  guessId: string;
+  /** What the server said was left, at the moment we anchored. */
+  remainingMsAtAnchor: number;
+  /** Local clock reading at that moment — used only as a delta. */
+  anchoredAt: number;
+};
+
+export type PriceAgeAnchor = {
+  /** How old the snapshot already was when it reached us, measured server-side. */
+  ageAtReceiptMs: number;
+  receivedAt: number;
+};
+
+export type GameError = {
+  /**
+   * `price_unavailable` — the third party is down, so no guess can be priced or resolved.
+   * `unreachable` — our own API or the network is unavailable.
+   */
+  code: "price_unavailable" | "unreachable";
+  message: string;
+};
+
 export function usePlayer() {
   const [state, setState] = useState<PlayerState | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<GameError | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [isNewPlayer, setIsNewPlayer] = useState(false);
+
+  /**
+   * The countdown is a *duration*, anchored once per guess and then counted on the local
+   * clock. It deliberately never compares a server timestamp with a browser timestamp.
+   *
+   * The earlier version did: it treated `price.asOf` as "now on the server" and re-derived a
+   * clock offset on every poll. But `asOf` is when the price was *observed*, and the 2-second
+   * cache means it is anywhere from 0 to 2 seconds old — so every poll re-anchored the clock
+   * somewhere new and the countdown visibly stepped backwards (31, 30, 31, 30…). The server's
+   * own `secondsElapsed` is quantised the same way, for the same reason.
+   *
+   * Anchoring once removes both problems and, as a side effect, makes a wrong browser clock
+   * irrelevant: only elapsed local time is used, never absolute local time.
+   */
+  const [countdown, setCountdown] = useState<CountdownAnchor | null>(null);
+
+  /**
+   * Price age has to reset when a new snapshot arrives, so it *is* re-anchored every poll —
+   * but still without comparing clocks. `Date` (server time at response) minus `asOf` (server
+   * time of observation) gives the true age at receipt from two server-side readings; local
+   * time only measures how long ago we received it.
+   */
+  const [priceAge, setPriceAge] = useState<PriceAgeAnchor | null>(null);
 
   // One identity request per mount, even though React's dev-mode double-invoke runs the
   // effect twice. Without this, a first visit creates two players and orphans one.
@@ -67,6 +116,7 @@ export function usePlayer() {
 
       const created = (await response.json()) as { playerId: string };
       window.localStorage.setItem(STORAGE_KEY, created.playerId);
+      setIsNewPlayer(true);
       return created.playerId;
     })().catch((cause: unknown) => {
       identity.current = null; // let the next poll retry
@@ -90,14 +140,55 @@ export function usePlayer() {
         response = await fetch(`/api/players/${id}`, { cache: "no-store" });
       }
 
+      if (response.status === 502) {
+        // The price source is down. Keep the last known state on screen: the score and any
+        // pending guess are safe on the server, and nothing here is stale enough to mislead.
+        const body = (await response.json().catch(() => null)) as { message?: string } | null;
+        setError({
+          code: "price_unavailable",
+          message: body?.message ?? "The BTC price source is unavailable right now.",
+        });
+        return;
+      }
+
       if (!response.ok) {
         throw new Error(`GET /api/players/${id} responded ${response.status}`);
       }
 
-      setState((await response.json()) as PlayerState);
+      const next = (await response.json()) as PlayerState;
+      const receivedAt = Date.now();
+      setState(next);
+
+      const serverDate = response.headers.get("date");
+      setPriceAge({
+        ageAtReceiptMs: serverDate
+          ? Math.max(0, Date.parse(serverDate) - Date.parse(next.price.asOf))
+          : 0,
+        receivedAt,
+      });
+
+      setCountdown((current) => {
+        const guess = next.activeGuess;
+        if (!guess) return null;
+        // Never re-anchor mid-guess: that is what made the countdown jump backwards.
+        if (current?.guessId === guess.guessId) return current;
+
+        return {
+          guessId: guess.guessId,
+          remainingMsAtAnchor: Math.max(
+            0,
+            RESOLUTION_DELAY_MS - guess.secondsElapsed * 1_000,
+          ),
+          anchoredAt: receivedAt,
+        };
+      });
+
       setError(null);
     } catch {
-      setError("Can't reach the game right now. Retrying…");
+      setError({
+        code: "unreachable",
+        message: "Can't reach the game right now. Retrying…",
+      });
     }
   }, [playerId]);
 
@@ -117,11 +208,20 @@ export function usePlayer() {
         if (response.ok || response.status === 409) {
           setError(null);
         } else {
-          const body = (await response.json().catch(() => null)) as { message?: string } | null;
-          setError(body?.message ?? "Couldn't place that guess. Please try again.");
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+            message?: string;
+          } | null;
+          setError({
+            code: body?.error === "price_unavailable" ? "price_unavailable" : "unreachable",
+            message: body?.message ?? "Couldn't place that guess. Please try again.",
+          });
         }
       } catch {
-        setError("Couldn't place that guess. Please try again.");
+        setError({
+          code: "unreachable",
+          message: "Couldn't place that guess. Please try again.",
+        });
       } finally {
         setSubmitting(false);
         // Never derive the new state locally: re-read it from the server.
@@ -139,5 +239,5 @@ export function usePlayer() {
     return () => clearInterval(timer);
   }, [refresh, pollIntervalMs]);
 
-  return { state, error, submitting, submitGuess };
+  return { state, error, submitting, submitGuess, countdown, priceAge, isNewPlayer };
 }
