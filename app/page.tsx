@@ -1,10 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-
-import type { PriceSnapshot } from "@/lib/price";
-
-const POLL_INTERVAL_MS = 5_000;
+import { usePlayer } from "@/app/use-player";
 
 const usd = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -14,27 +10,7 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 
 export default function Home() {
-  const [price, setPrice] = useState<PriceSnapshot | null>(null);
-  const [priceError, setPriceError] = useState<string | null>(null);
-
-  const loadPrice = useCallback(async () => {
-    try {
-      const response = await fetch("/api/price", { cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(`/api/price responded ${response.status}`);
-      }
-      setPrice((await response.json()) as PriceSnapshot);
-      setPriceError(null);
-    } catch {
-      setPriceError("Can't reach the price feed. Retrying…");
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadPrice();
-    const timer = setInterval(() => void loadPrice(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [loadPrice]);
+  const { state, error } = usePlayer();
 
   return (
     <main className="page">
@@ -47,9 +23,9 @@ export default function Home() {
         <p className="label" id="price-label">
           BTC / USD
         </p>
-        <div className="price">{price ? usd.format(price.price) : "—"}</div>
-        <p className="meta" data-tone={priceError ? "warn" : undefined}>
-          {priceError ?? (price ? "Live from Coinbase" : "Loading…")}
+        <div className="price">{state ? usd.format(state.price.price) : "—"}</div>
+        <p className="meta" data-tone={error ? "warn" : undefined}>
+          {error ?? (state ? "Live from Coinbase" : "Loading…")}
         </p>
       </section>
 
@@ -57,7 +33,7 @@ export default function Home() {
         <p className="label" id="score-label">
           Your score
         </p>
-        <div className="score">0</div>
+        <div className="score">{state ? state.score : "—"}</div>
       </section>
 
       <div className="actions">
