@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PriceSnapshot } from "@/lib/price";
+import type { Direction, GuessOutcome, PendingReason } from "@/lib/resolve-guess";
 
 /**
  * The player's identity is an opaque id the server generated, kept in localStorage so the
@@ -10,20 +11,45 @@ import type { PriceSnapshot } from "@/lib/price";
  * read from the server on every poll, because the server is the source of truth.
  */
 const STORAGE_KEY = "btc-up-down.playerId";
-const POLL_INTERVAL_MS = 5_000;
+
+/** Faster while a guess is open, so the countdown stays honest. */
+const POLL_PENDING_MS = 2_000;
+const POLL_IDLE_MS = 5_000;
+
+export type PendingGuess = {
+  guessId: string;
+  direction: Direction;
+  priceAtGuess: number;
+  createdAt: string;
+  status: "pending";
+  pendingReason: PendingReason;
+  secondsElapsed: number;
+  resolvesNoEarlierThan: string;
+};
+
+export type ResolvedGuessView = {
+  guessId: string;
+  direction: Direction;
+  priceAtGuess: number;
+  priceAtResolution: number;
+  outcome: GuessOutcome;
+  scoreDelta: number;
+  resolvedAt: string;
+};
 
 export type PlayerState = {
   playerId: string;
   score: number;
   canGuess: boolean;
-  activeGuess: null;
-  lastResolvedGuess: null;
+  activeGuess: PendingGuess | null;
+  lastResolvedGuess: ResolvedGuessView | null;
   price: PriceSnapshot;
 };
 
 export function usePlayer() {
   const [state, setState] = useState<PlayerState | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   // One identity request per mount, even though React's dev-mode double-invoke runs the
   // effect twice. Without this, a first visit creates two players and orphans one.
@@ -75,11 +101,43 @@ export function usePlayer() {
     }
   }, [playerId]);
 
+  const submitGuess = useCallback(
+    async (direction: Direction) => {
+      setSubmitting(true);
+      try {
+        const id = await playerId();
+        const response = await fetch(`/api/players/${id}/guesses`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ direction }),
+        });
+
+        // 409 means the server already has a pending guess for this player — the refresh
+        // below will show it, so there is nothing to report as an error.
+        if (response.ok || response.status === 409) {
+          setError(null);
+        } else {
+          const body = (await response.json().catch(() => null)) as { message?: string } | null;
+          setError(body?.message ?? "Couldn't place that guess. Please try again.");
+        }
+      } catch {
+        setError("Couldn't place that guess. Please try again.");
+      } finally {
+        setSubmitting(false);
+        // Never derive the new state locally: re-read it from the server.
+        await refresh();
+      }
+    },
+    [playerId, refresh],
+  );
+
+  const pollIntervalMs = state?.activeGuess ? POLL_PENDING_MS : POLL_IDLE_MS;
+
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    const timer = setInterval(() => void refresh(), pollIntervalMs);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, pollIntervalMs]);
 
-  return { state, error };
+  return { state, error, submitting, submitGuess };
 }

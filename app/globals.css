@@ -97,6 +97,22 @@ body {
   color: var(--warn);
 }
 
+.pending-direction,
+.result {
+  font-size: 1.25rem;
+  font-weight: 650;
+}
+
+.pending-direction[data-direction="up"],
+.result[data-outcome="win"] {
+  color: var(--up);
+}
+
+.pending-direction[data-direction="down"],
+.result[data-outcome="loss"] {
+  color: var(--down);
+}
+
 .actions {
   display: flex;
   gap: 0.75rem;

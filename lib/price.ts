@@ -36,8 +36,17 @@ let cached: PriceSnapshot | null = null;
 let cachedAt = 0;
 let inFlight: Promise<PriceSnapshot> | null = null;
 
-export async function getPriceSnapshot(): Promise<PriceSnapshot> {
-  if (cached && Date.now() - cachedAt < CACHE_TTL_MS) {
+/**
+ * @param maxAgeMs how stale a cached snapshot may be. Pass 0 to force a live read.
+ *
+ * Recording a guess must use a live price. With a cached one, a player watching the real
+ * feed could wait for a jump and then guess against a price the server recorded seconds
+ * before it — the direction would already be known. Reads that only *display* or resolve a
+ * price can use the cache, because there is nothing to gain from a value the player cannot
+ * choose.
+ */
+export async function getPriceSnapshot(maxAgeMs = CACHE_TTL_MS): Promise<PriceSnapshot> {
+  if (cached && Date.now() - cachedAt < maxAgeMs) {
     return cached;
   }
 

@@ -7,21 +7,57 @@
 
 import { randomUUID } from "node:crypto";
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { ConditionalCheckFailedException, DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
 
+import type { Direction, GuessOutcome } from "@/lib/resolve-guess";
+import { GuessAlreadyPendingError, PlayerNotFoundError } from "@/lib/store.errors";
 import { sharedMemoryStore } from "@/lib/store.memory";
+
+export { GuessAlreadyPendingError, PlayerNotFoundError };
+
+export type ActiveGuess = {
+  guessId: string;
+  direction: Direction;
+  /** The price the server observed when it recorded the guess. */
+  priceAtGuess: number;
+  /** The `asOf` of that same observation, so time and price come from one reading. */
+  createdAt: string;
+};
+
+export type ResolvedGuess = ActiveGuess & {
+  priceAtResolution: number;
+  outcome: GuessOutcome;
+  scoreDelta: number;
+  resolvedAt: string;
+};
 
 export type Player = {
   playerId: string;
   score: number;
   createdAt: string;
   updatedAt: string;
+  /** Absent means no pending guess — which is exactly the "one guess at a time" rule. */
+  activeGuess?: ActiveGuess;
+  lastResolvedGuess?: ResolvedGuess;
 };
 
 export interface Store {
   createPlayer(): Promise<Player>;
   getPlayer(playerId: string): Promise<Player | null>;
+  /** @throws PlayerNotFoundError, GuessAlreadyPendingError */
+  addGuess(playerId: string, guess: ActiveGuess): Promise<Player>;
+  /**
+   * Applies the score change and clears the pending guess, but only if that guess is still
+   * the active one. Concurrent callers therefore cannot double-count: the first wins and
+   * the rest are no-ops that return the already-resolved player.
+   */
+  resolveActiveGuess(playerId: string, resolved: ResolvedGuess): Promise<Player>;
 }
 
 const TABLE_NAME = process.env.PLAYERS_TABLE_NAME ?? "btc-up-down-players";
@@ -29,7 +65,23 @@ const TABLE_NAME = process.env.PLAYERS_TABLE_NAME ?? "btc-up-down-players";
 function createDynamoStore(): Store {
   // Region and credentials come from the ambient environment: `~/.aws` locally, the
   // execution role on Amplify. The app never holds a long-lived credential.
-  const client = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+    marshallOptions: { removeUndefinedValues: true },
+  });
+
+  const readPlayer = async (playerId: string): Promise<Player | null> => {
+    const result = await client.send(
+      new GetCommand({
+        TableName: TABLE_NAME,
+        Key: { playerId },
+        // A player polls immediately after writing, so an eventually consistent read
+        // could show them a stale score. Doubling the read cost is the cheaper problem.
+        ConsistentRead: true,
+      }),
+    );
+
+    return toPlayer(result.Item);
+  };
 
   return {
     async createPlayer() {
@@ -52,18 +104,74 @@ function createDynamoStore(): Store {
       return player;
     },
 
-    async getPlayer(playerId) {
-      const result = await client.send(
-        new GetCommand({
-          TableName: TABLE_NAME,
-          Key: { playerId },
-          // A player polls immediately after writing, so an eventually consistent read
-          // could show them a stale score. Doubling the read cost is the cheaper problem.
-          ConsistentRead: true,
-        }),
-      );
+    getPlayer: readPlayer,
 
-      return toPlayer(result.Item);
+    async addGuess(playerId, guess) {
+      try {
+        const result = await client.send(
+          new UpdateCommand({
+            TableName: TABLE_NAME,
+            Key: { playerId },
+            UpdateExpression: "SET activeGuess = :guess, updatedAt = :now",
+            // The database enforces "one guess at a time". Two simultaneous submissions
+            // cannot both pass this check, so the 409 is a guarantee rather than a race we
+            // hope to win by reading first.
+            ConditionExpression:
+              "attribute_exists(playerId) AND attribute_not_exists(activeGuess)",
+            ExpressionAttributeValues: { ":guess": guess, ":now": guess.createdAt },
+            ReturnValues: "ALL_NEW",
+          }),
+        );
+
+        const player = toPlayer(result.Attributes);
+        if (!player) throw new PlayerNotFoundError(playerId);
+        return player;
+      } catch (error) {
+        if (error instanceof ConditionalCheckFailedException) {
+          // One condition covers two causes; a read on this rare path tells them apart.
+          const existing = await readPlayer(playerId);
+          if (!existing) throw new PlayerNotFoundError(playerId);
+          throw new GuessAlreadyPendingError();
+        }
+        throw error;
+      }
+    },
+
+    async resolveActiveGuess(playerId, resolved) {
+      try {
+        const result = await client.send(
+          new UpdateCommand({
+            TableName: TABLE_NAME,
+            Key: { playerId },
+            UpdateExpression: [
+              "SET lastResolvedGuess = :resolved, updatedAt = :now",
+              "ADD score :delta",
+              "REMOVE activeGuess",
+            ].join(" "),
+            ConditionExpression: "activeGuess.guessId = :guessId",
+            ExpressionAttributeValues: {
+              ":resolved": resolved,
+              ":now": resolved.resolvedAt,
+              ":delta": resolved.scoreDelta,
+              ":guessId": resolved.guessId,
+            },
+            ReturnValues: "ALL_NEW",
+          }),
+        );
+
+        const player = toPlayer(result.Attributes);
+        if (!player) throw new PlayerNotFoundError(playerId);
+        return player;
+      } catch (error) {
+        if (error instanceof ConditionalCheckFailedException) {
+          // Somebody else resolved this guess first. That is a success, not a failure:
+          // return the current state rather than applying the score change twice.
+          const existing = await readPlayer(playerId);
+          if (!existing) throw new PlayerNotFoundError(playerId);
+          return existing;
+        }
+        throw error;
+      }
     },
   };
 }
@@ -82,6 +190,8 @@ function toPlayer(item: unknown): Player | null {
     score: candidate.score,
     createdAt: candidate.createdAt,
     updatedAt: candidate.updatedAt,
+    ...(candidate.activeGuess ? { activeGuess: candidate.activeGuess } : {}),
+    ...(candidate.lastResolvedGuess ? { lastResolvedGuess: candidate.lastResolvedGuess } : {}),
   };
 }
 

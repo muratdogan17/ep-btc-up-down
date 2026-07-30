@@ -1,14 +1,22 @@
 import { randomUUID } from "node:crypto";
 
 // Type-only import, so there is no runtime cycle with lib/store.ts.
-import type { Player, Store } from "@/lib/store";
+import type { ActiveGuess, Player, ResolvedGuess, Store } from "@/lib/store";
+import { GuessAlreadyPendingError, PlayerNotFoundError } from "@/lib/store.errors";
 
 /**
- * In-process implementation of the same contract as the DynamoDB store.
+ * In-process implementation of the same contract as the DynamoDB store, including its two
+ * invariants: no second guess while one is pending, and a guess resolves at most once.
  *
  * Pass no argument and you get an isolated Map — that is what the tests want.
  */
 export function createMemoryStore(players = new Map<string, Player>()): Store {
+  const read = (playerId: string): Player => {
+    const player = players.get(playerId);
+    if (!player) throw new PlayerNotFoundError(playerId);
+    return player;
+  };
+
   return {
     async createPlayer() {
       const now = new Date().toISOString();
@@ -26,6 +34,36 @@ export function createMemoryStore(players = new Map<string, Player>()): Store {
     async getPlayer(playerId) {
       const player = players.get(playerId);
       return player ? { ...player } : null;
+    },
+
+    async addGuess(playerId: string, guess: ActiveGuess) {
+      const player = read(playerId);
+      if (player.activeGuess) throw new GuessAlreadyPendingError();
+
+      const updated: Player = { ...player, activeGuess: guess, updatedAt: guess.createdAt };
+      players.set(playerId, updated);
+      return { ...updated };
+    },
+
+    async resolveActiveGuess(playerId: string, resolved: ResolvedGuess) {
+      const player = read(playerId);
+
+      // Mirrors the DynamoDB conditional write: if this guess is no longer the active one,
+      // somebody already resolved it and the score must not move again.
+      if (player.activeGuess?.guessId !== resolved.guessId) {
+        return { ...player };
+      }
+
+      const { activeGuess: _resolved, ...rest } = player;
+      const updated: Player = {
+        ...rest,
+        score: player.score + resolved.scoreDelta,
+        lastResolvedGuess: resolved,
+        updatedAt: resolved.resolvedAt,
+      };
+
+      players.set(playerId, updated);
+      return { ...updated };
     },
   };
 }

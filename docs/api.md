@@ -186,12 +186,14 @@ guessed price. The client keeps showing the last known state and a warning.
   "createdAt": "2026-07-30T09:12:00.000Z",
   "status": "pending",
   "pendingReason": "waiting_for_time",
+  "secondsElapsed": 0,
   "resolvesNoEarlierThan": "2026-07-30T09:13:00.000Z"
 }
 ```
 
 `priceAtGuess` and `createdAt` are both taken from the server's price snapshot, so the
-recorded price and the recorded time refer to the same observation.
+recorded price and the recorded time refer to the same observation. That snapshot is a live
+reading rather than a cached one — see [Price source](#price-source).
 
 **`409 Conflict`** — a guess is already pending
 
@@ -321,6 +323,12 @@ and simply re-read.
 - **In-memory cache, 2 second TTL.** Enough to keep polling clients from multiplying into
   upstream requests, short enough that resolution uses a near-live price. `asOf` is the
   time the snapshot was fetched, so callers can see the staleness rather than guess at it.
+- **Recording a guess bypasses the cache.** A cached price would be exploitable: a player
+  watching the live feed could wait for a jump and then submit a guess against a price the
+  server read seconds *before* it, knowing the direction already. So `POST …/guesses`
+  always takes a live reading, while endpoints that merely display or resolve a price may
+  use the cache — there is nothing to gain from a value the player cannot choose. The cost
+  is one upstream request per guess, and a guess is at most one per player per minute.
 - The cache lives in the process, and on Amplify's SSR runtime each Lambda instance has
   its own. That reduces upstream traffic without guaranteeing a single global snapshot,
   which is fine: every value is still a real observed price with its own honest `asOf`.
@@ -394,8 +402,8 @@ Every read and write goes through `lib/store.ts`, which exposes intent, not Dyna
 ```ts
 createPlayer(): Promise<Player>
 getPlayer(playerId): Promise<Player | null>
-addGuess(playerId, guess): Promise<Player>          // throws GuessAlreadyPendingError
-resolveActiveGuess(playerId, guessId, resolution): Promise<Player>
+addGuess(playerId, guess): Promise<Player>          // throws PlayerNotFoundError, GuessAlreadyPendingError
+resolveActiveGuess(playerId, resolved): Promise<Player>   // no-op if already resolved
 ```
 
 Nothing above this module imports the AWS SDK or knows a table exists. An in-memory
